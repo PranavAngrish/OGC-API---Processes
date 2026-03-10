@@ -1,0 +1,793 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OGC API – Processes</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&display=swap');
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body, #root { height: 100%; width: 100%; overflow: hidden; background: #080c10; }
+    ::-webkit-scrollbar { width: 4px; height: 4px; }
+    ::-webkit-scrollbar-track { background: #080c10; }
+    ::-webkit-scrollbar-thumb { background: #1a3a4a; border-radius: 2px; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+    @keyframes fadeIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .leaflet-container { background: #0a1018 !important; }
+    .leaflet-tile-pane { filter: brightness(0.85) saturate(0.7); }
+    input:focus { outline: none; border-color: #00ccff !important; }
+    .tab-panel { display: none; flex: 1; flex-direction: column; overflow: hidden; }
+    .tab-panel.active { display: flex; }
+    .tab-scroll { flex: 1; overflow: auto; padding: 20px; }
+    .spin { animation: spin 0.8s linear infinite; display: inline-block; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+const BASE = "http://localhost";
+const mono = "'DM Mono','Courier New',monospace";
+
+const ENDPOINTS = [
+  { id:"landing",     method:"GET", path:"/",                       auth:false, label:"Landing Page",      group:"discovery" },
+  { id:"conformance", method:"GET", path:"/conformance",            auth:false, label:"Conformance",       group:"discovery" },
+  { id:"openapi",     method:"GET", path:"/openapi",                auth:false, label:"OpenAPI Spec",      group:"discovery" },
+  { id:"processes",   method:"GET", path:"/processes",              auth:true,  label:"List Processes",    group:"processes" },
+  { id:"buf-info",    method:"GET", path:"/processes/buffer",       auth:true,  label:"Buffer Info",       group:"processes" },
+  { id:"zon-info",    method:"GET", path:"/processes/zonal-stats",  auth:true,  label:"Zonal Stats Info",  group:"processes" },
+  { id:"jobs",        method:"GET", path:"/jobs",                   auth:true,  label:"List Jobs",         group:"jobs"      },
+];
+
+const STATUS_COLORS = {
+  200:"#00ff88", 201:"#00ccff", 204:"#ffcc00",
+  401:"#ff6b35", 403:"#ff3366", 404:"#ff6b35", ERR:"#ff3366"
+};
+
+const S = {
+  input: {
+    background:"#030810", border:"1px solid #1a2a3a", color:"#c8d8e8",
+    padding:"8px 12px", borderRadius:3, fontSize:12, width:"100%",
+    fontFamily:mono, transition:"border-color 0.15s"
+  },
+  btn: (color="#00ff88", bg="#003a20") => ({
+    background:bg, border:`1px solid ${color}55`, color,
+    padding:"7px 14px", borderRadius:3, cursor:"pointer",
+    fontSize:10, letterSpacing:"0.1em", fontFamily:mono, whiteSpace:"nowrap"
+  }),
+  tag: (color="#00ff88") => ({
+    background:`${color}18`, border:`1px solid ${color}44`, color,
+    padding:"1px 7px", borderRadius:2, fontSize:9, fontWeight:700, letterSpacing:"0.08em"
+  }),
+  card: { background:"#040810", border:"1px solid #1a2a3a", borderRadius:4, padding:"10px 14px" },
+  label: { fontSize:9, color:"#4a7a9a", letterSpacing:"0.14em", textTransform:"uppercase", marginBottom:6, display:"block" }
+};
+
+// ─── Login Screen ─────────────────────────────────────────────────────────────
+function LoginScreen({ onLogin }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error,    setError]    = useState("");
+  const [loading,  setLoading]  = useState(false);
+
+  const submit = async () => {
+    setError(""); setLoading(true);
+    const res = await fetch(`${BASE}/auth/login`, {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ username, password })
+    });
+    const data = await res.json();
+    setLoading(false);
+    if (!res.ok) { setError(data.detail || "Invalid credentials"); return; }
+    onLogin(data);
+  };
+
+  const handleKey = e => { if (e.key === "Enter") submit(); };
+
+  return (
+    <div style={{
+      height:"100vh", display:"flex", alignItems:"center", justifyContent:"center",
+      background:"#080c10", fontFamily:mono,
+      backgroundImage:"radial-gradient(ellipse at 20% 50%, #00ff8808 0%, transparent 60%), radial-gradient(ellipse at 80% 20%, #00ccff08 0%, transparent 60%)"
+    }}>
+      <div style={{ width:380, animation:"fadeIn 0.4s ease" }}>
+
+        {/* Logo */}
+        <div style={{ textAlign:"center", marginBottom:36 }}>
+          <div style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:10, marginBottom:8 }}>
+            <div style={{ width:8, height:8, borderRadius:"50%", background:"#00ff88", boxShadow:"0 0 12px #00ff88", animation:"pulse 2s infinite" }} />
+            <span style={{ color:"#00ff88", fontSize:14, letterSpacing:"0.2em", fontWeight:500 }}>OGC API — PROCESSES</span>
+          </div>
+          <div style={{ color:"#2a5a6a", fontSize:11, letterSpacing:"0.1em" }}>pygeoapi · nginx · docker</div>
+        </div>
+
+        {/* Card */}
+        <div style={{ background:"#060a0e", border:"1px solid #1a2a3a", borderRadius:6, padding:28 }}>
+          <div style={{ fontSize:13, color:"#c8d8e8", letterSpacing:"0.1em", textTransform:"uppercase", marginBottom:20, textAlign:"center" }}>Sign In</div>
+
+          {/* Fields */}
+          <div style={{ marginBottom:14 }}>
+            <span style={S.label}>Username</span>
+            <input value={username} onChange={e=>setUsername(e.target.value)} onKeyDown={handleKey}
+              placeholder="enter username" style={S.input} autoFocus />
+          </div>
+          <div style={{ marginBottom:20 }}>
+            <span style={S.label}>Password</span>
+            <input type="password" value={password} onChange={e=>setPassword(e.target.value)} onKeyDown={handleKey}
+              placeholder="enter password" style={S.input} />
+          </div>
+
+
+          {/* Error */}
+          {error && (
+            <div style={{ background:"#1a0810", border:"1px solid #ff336644", borderRadius:3, padding:"8px 12px", marginBottom:16, fontSize:11, color:"#ff3366" }}>
+              ⚠ {error}
+            </div>
+          )}
+
+          {/* Submit */}
+          <button onClick={submit} disabled={loading} style={{
+            ...S.btn("#00ff88","#002a18"), width:"100%", textAlign:"center",
+            padding:"10px", fontSize:11, letterSpacing:"0.15em",
+            opacity: loading ? 0.7 : 1
+          }}>
+            {loading ? <span className="spin">◌</span> : "LOGIN"}
+          </button>
+
+          {/* Default creds hint */}
+          <div style={{ marginTop:14, padding:"8px 12px", background:"#040810", border:"1px solid #1a2a3a", borderRadius:3 }}>
+            <div style={{ fontSize:9, color:"#2a5a6a", letterSpacing:"0.1em", marginBottom:4 }}>DEFAULT ADMIN CREDENTIALS</div>
+            <code style={{ fontSize:11, color:"#4a7a9a" }}>admin / admin123</code>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Main App ─────────────────────────────────────────────────────────────────
+function App() {
+  const [authData,  setAuthData]  = useState(null); // null = not logged in
+  const [tab,       setTab]       = useState("map");
+  const [response,  setResponse]  = useState(null);
+  const [loading,   setLoading]   = useState(false);
+  const [format,    setFormat]    = useState("json");
+  const [execMode,  setExecMode]  = useState("sync");
+  const [logs,      setLogs]      = useState([]);
+  const [isDrawing, setIsDrawing] = useState(false);
+  const [drawnZone, setDrawnZone] = useState(null);
+  const [jobId,     setJobId]     = useState("");
+  const [jobStatus, setJobStatus] = useState(null);
+  const [jobResult, setJobResult] = useState(null);
+  const [userInfo,  setUserInfo]  = useState(null);
+  const [showUserMenu, setShowUserMenu] = useState(false);
+
+  const [bufLat,    setBufLat]    = useState("12.9716");
+  const [bufLon,    setBufLon]    = useState("77.5946");
+  const [bufDist,   setBufDist]   = useState("1000");
+  const [zonalVals, setZonalVals] = useState("12.5,34.2,8.9,45.1,23.7,67.3,15.6,29.8,52.4,38.0");
+
+  const mapRef      = useRef(null);
+  const leafletMap  = useRef(null);
+  const bufLayer    = useRef(null);
+  const markerLayer = useRef(null);
+  const zoneLayer   = useRef(null);
+  const isDrawRef   = useRef(false);
+  const drawnPts    = useRef([]);
+
+  const addLog = useCallback((msg, status) => {
+    setLogs(p => [{ id:Date.now(), time:new Date().toLocaleTimeString(), msg, status }, ...p].slice(0,60));
+  }, []);
+
+  // ── Handle login ──────────────────────────────────────────────────────────
+  const handleLogin = (data) => {
+    setAuthData(data);
+    // Fetch user info
+    fetch(`${BASE}/auth/me`, { headers:{ Authorization:`Bearer ${data.token}` }})
+      .then(r => r.json()).then(setUserInfo).catch(()=>{});
+  };
+
+  // ── Handle logout ─────────────────────────────────────────────────────────
+  const handleLogout = async () => {
+    if (authData?.token) {
+      await fetch(`${BASE}/auth/revoke`, {
+        method:"POST", headers:{ Authorization:`Bearer ${authData.token}` }
+      }).catch(()=>{});
+    }
+    setAuthData(null); setUserInfo(null); setShowUserMenu(false);
+    setLogs([]); setResponse(null); setJobId(""); setJobStatus(null); setJobResult(null);
+  };
+
+  // ── Init map — only after login ─────────────────────────────────────────
+  useEffect(() => {
+    if (!authData) return;
+    setTimeout(() => {
+      if (!mapRef.current || leafletMap.current) return;
+      const L = window.L;
+      const map = L.map(mapRef.current, { zoomControl:false }).setView([12.9716, 77.5946], 12);
+    L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+      attribution:"©OpenStreetMap ©CartoDB", maxZoom:19
+    }).addTo(map);
+    L.control.zoom({ position:"bottomright" }).addTo(map);
+    bufLayer.current = L.layerGroup().addTo(map);
+    markerLayer.current = L.layerGroup().addTo(map);
+    zoneLayer.current = L.layerGroup().addTo(map);
+    leafletMap.current = map;
+    setTimeout(() => map.invalidateSize(), 100);
+
+    map.on("click", e => {
+      const L = window.L;
+      if (isDrawRef.current) {
+        drawnPts.current.push([e.latlng.lat, e.latlng.lng]);
+        L.circleMarker([e.latlng.lat, e.latlng.lng], { radius:4, color:"#00ccff", fillColor:"#00ccff", fillOpacity:1, weight:1 }).addTo(zoneLayer.current);
+        if (drawnPts.current.length > 1)
+          L.polyline(drawnPts.current, { color:"#00ccff", weight:1.5, dashArray:"4,4" }).addTo(zoneLayer.current);
+        setDrawnZone([...drawnPts.current]);
+      } else {
+        setBufLat(e.latlng.lat.toFixed(6)); setBufLon(e.latlng.lng.toFixed(6));
+        markerLayer.current.clearLayers();
+        L.circleMarker([e.latlng.lat, e.latlng.lng], { radius:7, color:"#ff6b35", fillColor:"#ff6b35", fillOpacity:0.85, weight:2 })
+          .addTo(markerLayer.current)
+          .bindPopup(`<div style="font-family:monospace;font-size:11px;color:#c8d8e8;background:#0a1018;padding:4px 8px">📍 ${e.latlng.lat.toFixed(5)}, ${e.latlng.lng.toFixed(5)}</div>`)
+          .openPopup();
+      }
+    });
+    }, 50);
+  }, [authData]);
+
+  useEffect(() => { isDrawRef.current = isDrawing; }, [isDrawing]);
+  useEffect(() => { if (tab==="map" && leafletMap.current) setTimeout(()=>leafletMap.current.invalidateSize(), 10); }, [tab]);
+
+  // ── API call with JWT ─────────────────────────────────────────────────────
+  const call = useCallback(async (method, path, body=null, extraHeaders={}) => {
+    setLoading(true);
+    const headers = {
+      "Content-Type":"application/json",
+      ...(authData?.token ? { "Authorization":`Bearer ${authData.token}` } : {}),
+      ...extraHeaders
+    };
+    try {
+      const res  = await fetch(`${BASE}${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
+      const text = await res.text();
+      let data; try { data = JSON.parse(text); } catch { data = text; }
+      const result = { status:res.status, data, path, method };
+      setResponse(result); addLog(`${method} ${path}`, res.status); setLoading(false);
+      // Auto-logout on 401
+      if (res.status === 401) { handleLogout(); return result; }
+      return result;
+    } catch(err) {
+      const result = { status:"ERR", data:{ error:err.message }, path, method };
+      setResponse(result); addLog(`${method} ${path} — ${err.message}`, "ERR"); setLoading(false);
+      return result;
+    }
+  }, [authData, addLog]);
+
+  const callEp = ep => { const q = format!=="json" ? `?f=${format}` : ""; call(ep.method, ep.path+q); setTab("api"); };
+
+  const runBuffer = async () => {
+    const body = { inputs:{ latitude:parseFloat(bufLat), longitude:parseFloat(bufLon), distance:parseFloat(bufDist) }};
+    const headers = execMode==="async" ? { "Prefer":"respond-async" } : {};
+    const res = await call("POST", "/processes/buffer/execution", body, headers);
+    if (!res) return;
+    if (execMode==="async" && res.data?.jobID) { setJobId(res.data.jobID); setTab("jobs"); }
+    else if (res.data?.geometry) drawGeoJSON(res.data, "#00ff88");
+  };
+
+  const drawGeoJSON = (geojson, color="#00ff88") => {
+    const L = window.L;
+    bufLayer.current.clearLayers();
+    L.geoJSON(geojson, { style:{ color, weight:2, fillColor:color, fillOpacity:0.12 }}).addTo(bufLayer.current);
+    try { leafletMap.current.fitBounds(L.geoJSON(geojson).getBounds(), { padding:[50,50] }); } catch(e){}
+  };
+
+  const startDrawing = () => { zoneLayer.current?.clearLayers(); drawnPts.current=[]; setDrawnZone(null); setIsDrawing(true); };
+  const finishZone = () => {
+    if (drawnPts.current.length < 3) return;
+    const L = window.L;
+    zoneLayer.current.clearLayers();
+    L.polygon(drawnPts.current, { color:"#00ccff", weight:2, fillColor:"#00ccff", fillOpacity:0.1 }).addTo(zoneLayer.current);
+    setDrawnZone([...drawnPts.current, drawnPts.current[0]]);
+    setIsDrawing(false); drawnPts.current=[];
+  };
+  const runZonal = async () => {
+    if (!drawnZone || drawnZone.length < 4) { alert("Draw a zone first"); return; }
+    const coords = [drawnZone.map(p=>[p[1],p[0]])];
+    const values = zonalVals.split(",").map(v=>parseFloat(v.trim())).filter(v=>!isNaN(v));
+    const body = { inputs:{ zone:{ type:"Polygon", coordinates:coords }, values }};
+    const headers = execMode==="async" ? { "Prefer":"respond-async" } : {};
+    const res = await call("POST", "/processes/zonal-stats/execution", body, headers);
+    if (res?.data?.jobID) { setJobId(res.data.jobID); setTab("jobs"); }
+  };
+
+  const checkJob   = async () => { const r=await call("GET",`/jobs/${jobId}`); if(r?.data) setJobStatus(r.data); };
+  const getResults = async () => {
+    const r=await call("GET",`/jobs/${jobId}/results?f=json`);
+    if(r?.data){ setJobResult(r.data); if(r.data.geometry){ drawGeoJSON(r.data); setTab("map"); }}
+  };
+  const deleteJob  = async () => { await call("DELETE",`/jobs/${jobId}`); setJobId(""); setJobStatus(null); setJobResult(null); };
+
+  // ── Show login screen if not authenticated ────────────────────────────────
+  if (!authData) return <LoginScreen onLogin={handleLogin} />;
+
+  const tokenExpiry = userInfo?.expires_at ? new Date(userInfo.expires_at).toLocaleTimeString() : "—";
+
+  return (
+    <div style={{ fontFamily:mono, background:"#080c10", color:"#c8d8e8", height:"100vh", display:"flex", flexDirection:"column" }}>
+
+      {/* Header */}
+      <header style={{ borderBottom:"1px solid #1a2a3a", padding:"10px 20px", display:"flex", alignItems:"center", gap:14, background:"#060a0e", flexShrink:0 }}>
+        <div style={{ width:7, height:7, borderRadius:"50%", background:"#00ff88", boxShadow:"0 0 8px #00ff88", animation:"pulse 2s infinite" }} />
+        <span style={{ color:"#00ff88", fontSize:12, letterSpacing:"0.18em", fontWeight:500 }}>OGC API — PROCESSES</span>
+        <span style={{ color:"#1a3a4a" }}>|</span>
+        <span style={{ color:"#2a5a6a", fontSize:11 }}>pygeoapi · nginx · docker</span>
+        {loading && <span style={{ marginLeft:8, color:"#ffcc00", fontSize:10, animation:"pulse 1s infinite" }}>● LOADING</span>}
+
+        {/* Tab buttons */}
+        <div style={{ marginLeft:"auto", display:"flex", gap:6, alignItems:"center" }}>
+          {["map","api","jobs","log","docs"].map(t => (
+            <button key={t} onClick={() => setTab(t)} style={{
+              background: tab===t ? "#0d2030" : "transparent",
+              border:`1px solid ${tab===t ? "#00ff88" : "#1a2a3a"}`,
+              color: tab===t ? "#00ff88" : "#3a6a7a",
+              padding:"3px 13px", borderRadius:2, cursor:"pointer",
+              fontSize:10, letterSpacing:"0.12em", fontFamily:mono, textTransform:"uppercase"
+            }}>{t}</button>
+          ))}
+
+          {/* User menu */}
+          <div style={{ position:"relative", marginLeft:8 }}>
+            <button onClick={()=>setShowUserMenu(m=>!m)} style={{
+              background:"#001a30", border:"1px solid #00ccff44", color:"#00ccff",
+              padding:"3px 12px", borderRadius:2, cursor:"pointer", fontSize:10,
+              letterSpacing:"0.1em", fontFamily:mono, display:"flex", alignItems:"center", gap:6
+            }}>
+              <span>◉</span>
+              <span>{authData.username}</span>
+              <span style={{ fontSize:8, color:"#2a5a6a" }}>{authData.role?.toUpperCase()}</span>
+            </button>
+            {showUserMenu && (
+              <div style={{
+                position:"absolute", right:0, top:"calc(100% + 6px)", zIndex:100,
+                background:"#060a0e", border:"1px solid #1a2a3a", borderRadius:4,
+                minWidth:220, animation:"fadeIn 0.15s ease", boxShadow:"0 8px 24px #000a"
+              }}>
+                <div style={{ padding:"12px 14px", borderBottom:"1px solid #1a2a3a" }}>
+                  <div style={{ fontSize:9, color:"#2a5a6a", letterSpacing:"0.12em", marginBottom:4 }}>SIGNED IN AS</div>
+                  <div style={{ fontSize:13, color:"#c8d8e8", marginBottom:2 }}>{authData.username}</div>
+                  <div style={{ fontSize:9, color:"#4a7a9a" }}>Role: {authData.role} · Expires: {tokenExpiry}</div>
+                </div>
+                <div style={{ padding:"6px" }}>
+                  <button onClick={()=>{ setTab("docs"); setShowUserMenu(false); }} style={{
+                    ...S.btn("#7aaabb","transparent"), width:"100%", textAlign:"left", padding:"7px 10px",
+                    border:"none", fontSize:11
+                  }}>◈ View API Docs</button>
+                  <button onClick={handleLogout} style={{
+                    ...S.btn("#ff3366","transparent"), width:"100%", textAlign:"left", padding:"7px 10px",
+                    border:"none", fontSize:11, marginTop:2
+                  }}>⏻ Sign Out</button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </header>
+
+      <div style={{ display:"flex", flex:1, overflow:"hidden" }} onClick={()=>showUserMenu&&setShowUserMenu(false)}>
+
+        {/* Sidebar */}
+        <aside style={{ width:260, borderRight:"1px solid #1a2a3a", display:"flex", flexDirection:"column", background:"#060a0e", flexShrink:0, overflowY:"auto" }}>
+          <div style={{ padding:"12px 14px", borderBottom:"1px solid #111820" }}>
+            <span style={S.label}>Response Format</span>
+            <div style={{ display:"flex", gap:5 }}>
+              {["json","jsonld","html"].map(f => (
+                <button key={f} onClick={() => setFormat(f)} style={{
+                  ...S.btn("#00ccff","transparent"), flex:1, textAlign:"center", padding:"4px 0",
+                  borderColor: format===f ? "#00ccff88" : "#1a2a3a",
+                  color: format===f ? "#00ccff" : "#2a5a6a",
+                  background: format===f ? "#001a30" : "transparent",
+                }}>?f={f}</button>
+              ))}
+            </div>
+          </div>
+
+          {["discovery","processes","jobs"].map(g => (
+            <div key={g}>
+              <div style={{ padding:"7px 14px", fontSize:9, color:"#1a4a5a", letterSpacing:"0.2em", textTransform:"uppercase", background:"#050810", borderBottom:"1px solid #0d1520" }}>{g}</div>
+              {ENDPOINTS.filter(e=>e.group===g).map(ep => (
+                <button key={ep.id} onClick={() => callEp(ep)} style={{
+                  width:"100%", background:"transparent", border:"none", borderBottom:"1px solid #0d1520",
+                  color:"#7aaabb", padding:"9px 14px", textAlign:"left", cursor:"pointer",
+                  display:"flex", alignItems:"center", gap:9, fontSize:11, fontFamily:mono
+                }}
+                onMouseEnter={e=>e.currentTarget.style.background="#0c1820"}
+                onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                  <span style={{ ...S.tag(ep.method==="GET"?"#00ff88":"#00ccff"), minWidth:28, textAlign:"center" }}>{ep.method}</span>
+                  <span>{ep.label}</span>
+                  {!ep.auth && <span style={{ marginLeft:"auto", fontSize:8, color:"#1a4a2a" }}>PUBLIC</span>}
+                </button>
+              ))}
+            </div>
+          ))}
+
+          {/* Token info */}
+          <div style={{ padding:"12px 14px", borderTop:"1px solid #111820", marginTop:"auto" }}>
+            <span style={S.label}>Active Token</span>
+            <div style={{ background:"#030810", border:"1px solid #1a2a3a", borderRadius:3, padding:"7px 10px", marginBottom:10 }}>
+              <div style={{ fontSize:9, color:"#00ccff", marginBottom:2 }}>Bearer JWT</div>
+              <code style={{ fontSize:9, color:"#4a7a9a", wordBreak:"break-all", lineHeight:1.5 }}>
+                {authData.token.slice(0,40)}...
+              </code>
+            </div>
+            <span style={S.label}>Execution Mode</span>
+            <div style={{ display:"flex", gap:5 }}>
+              {["sync","async"].map(m => (
+                <button key={m} onClick={() => setExecMode(m)} style={{
+                  ...S.btn("#ff6b35","transparent"), flex:1, textAlign:"center", padding:"5px 0",
+                  borderColor: execMode===m ? "#ff6b3588" : "#1a2a3a",
+                  color: execMode===m ? "#ff6b35" : "#3a3a3a",
+                  background: execMode===m ? "#1a0800" : "transparent",
+                }}>{m}</button>
+              ))}
+            </div>
+          </div>
+        </aside>
+
+        {/* Main panels */}
+        <main style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden", position:"relative" }}>
+
+          {/* MAP TAB */}
+          <div className={`tab-panel${tab==="map" ? " active" : ""}`}>
+            <div style={{ display:"flex", borderBottom:"1px solid #1a2a3a", background:"#060a0e", flexShrink:0 }}>
+              <div style={{ flex:1, padding:"14px 16px", borderRight:"1px solid #1a2a3a" }}>
+                <div style={{ fontSize:10, color:"#00ff88", letterSpacing:"0.15em", marginBottom:10, display:"flex", alignItems:"center", gap:6 }}>
+                  <span style={{ width:6, height:6, borderRadius:"50%", background:"#00ff88", display:"inline-block" }} /> BUFFER PROCESS
+                </div>
+                <div style={{ display:"flex", gap:8, marginBottom:8 }}>
+                  {[["LAT",bufLat,setBufLat],["LON",bufLon,setBufLon],["DIST (m)",bufDist,setBufDist]].map(([lbl,val,set]) => (
+                    <div key={lbl} style={{ flex:1 }}>
+                      <span style={S.label}>{lbl}</span>
+                      <input value={val} onChange={e=>set(e.target.value)} style={S.input} />
+                    </div>
+                  ))}
+                </div>
+                <div style={{ fontSize:9, color:"#1a4a2a", marginBottom:8 }}>↑ or click map to place point</div>
+                <button onClick={runBuffer} disabled={loading} style={{ ...S.btn("#00ff88","#002a18"), width:"100%", textAlign:"center" }}>
+                  {loading ? "RUNNING..." : `POST /buffer/execution  [${execMode.toUpperCase()}]`}
+                </button>
+              </div>
+              <div style={{ flex:1, padding:"14px 16px" }}>
+                <div style={{ fontSize:10, color:"#00ccff", letterSpacing:"0.15em", marginBottom:10, display:"flex", alignItems:"center", gap:6 }}>
+                  <span style={{ width:6, height:6, borderRadius:"50%", background:"#00ccff", display:"inline-block" }} /> ZONAL STATISTICS
+                </div>
+                <div style={{ marginBottom:8 }}>
+                  <span style={S.label}>Values (comma-separated)</span>
+                  <input value={zonalVals} onChange={e=>setZonalVals(e.target.value)} style={S.input} />
+                </div>
+                <div style={{ display:"flex", gap:6 }}>
+                  <button onClick={startDrawing} style={{ ...S.btn("#00ccff", isDrawing?"#002a40":"#001520"), flex:1, textAlign:"center" }}>
+                    {isDrawing ? "● DRAWING..." : "DRAW ZONE"}
+                  </button>
+                  {isDrawing && <button onClick={finishZone} style={{ ...S.btn("#ffcc00","#1a1000"), flex:1, textAlign:"center" }}>FINISH ({drawnZone?.length||0}pts)</button>}
+                  {!isDrawing && drawnZone && <button onClick={runZonal} disabled={loading} style={{ ...S.btn("#00ccff","#001520"), flex:1, textAlign:"center" }}>{loading ? "RUNNING..." : `EXECUTE [${execMode.toUpperCase()}]`}</button>}
+                </div>
+              </div>
+            </div>
+            <div ref={mapRef} style={{ flex:1 }} />
+            <div style={{ padding:"6px 16px", borderTop:"1px solid #1a2a3a", background:"#060a0e", display:"flex", gap:20, fontSize:10, color:"#2a5a6a", flexShrink:0 }}>
+              <span style={{ color:"#00ff8866" }}>● Buffer result</span>
+              <span style={{ color:"#00ccff66" }}>● Zone boundary</span>
+              <span style={{ color:"#ff6b3566" }}>● Selected point</span>
+              <span style={{ marginLeft:"auto" }}>Click map → buffer point · Draw zone → zonal stats</span>
+            </div>
+          </div>
+
+          {/* API TAB */}
+          <div className={`tab-panel${tab==="api" ? " active" : ""}`}>
+            <div className="tab-scroll">
+              {response ? (<>
+                <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:14 }}>
+                  <span style={{ ...S.tag(STATUS_COLORS[response.status]||"#c8d8e8"), fontSize:13, padding:"3px 10px" }}>{response.status}</span>
+                  <span style={{ color:"#4a7a9a", fontSize:12 }}>{response.method} {response.path}</span>
+                </div>
+                <pre style={{ ...S.card, fontSize:11, color:"#8abacc", overflow:"auto", maxHeight:"calc(100vh - 200px)", lineHeight:1.7 }}>
+                  {typeof response.data==="string" ? response.data : JSON.stringify(response.data,null,2)}
+                </pre>
+              </>) : <div style={{ color:"#1a3a4a", fontSize:13, textAlign:"center", marginTop:100 }}>← click an endpoint in the sidebar</div>}
+            </div>
+          </div>
+
+          {/* JOBS TAB */}
+          <div className={`tab-panel${tab==="jobs" ? " active" : ""}`}>
+            <div className="tab-scroll">
+              <span style={S.label}>Job ID</span>
+              <input value={jobId} onChange={e=>setJobId(e.target.value)} placeholder="paste job ID or submit a process async..." style={{ ...S.input, marginBottom:10 }} />
+              <div style={{ display:"flex", gap:8, marginBottom:20 }}>
+                <button onClick={checkJob}   style={S.btn("#00ccff","#001520")}>GET STATUS</button>
+                <button onClick={getResults} style={S.btn("#00ff88","#002a18")}>GET RESULTS</button>
+                <button onClick={deleteJob}  style={S.btn("#ff3366","#1a0010")}>DELETE JOB</button>
+              </div>
+              {jobStatus && (
+                <div style={{ marginBottom:20 }}>
+                  <span style={{ ...S.label, marginBottom:10 }}>Job Status</span>
+                  <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:12 }}>
+                    {[["Process",jobStatus.processID],["Status",jobStatus.status],["Progress",jobStatus.progress+"%"],["Created",jobStatus.created?.slice(11,19)],["Finished",jobStatus.finished?.slice(11,19)]].map(([k,v])=>v&&(
+                      <div key={k} style={{ ...S.card, minWidth:100 }}>
+                        <span style={S.label}>{k}</span>
+                        <div style={{ fontSize:13, color:k==="Status"?(jobStatus.status==="successful"?"#00ff88":"#ff6b35"):"#c8d8e8", fontWeight:500 }}>{v}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {jobResult && (
+                <div>
+                  <span style={{ ...S.label, marginBottom:10 }}>Result</span>
+                  {jobResult.statistics && (
+                    <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:14 }}>
+                      {Object.entries(jobResult.statistics).map(([k,v]) => (
+                        <div key={k} style={{ background:"#001828", border:"1px solid #00ccff22", borderRadius:4, padding:"8px 14px", minWidth:90 }}>
+                          <span style={{ ...S.label, color:"#00ccff66" }}>{k}</span>
+                          <div style={{ fontSize:18, color:"#00ccff", fontWeight:500 }}>{v}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <pre style={{ ...S.card, fontSize:10, color:"#8abacc", overflow:"auto", maxHeight:280, lineHeight:1.6 }}>{JSON.stringify(jobResult,null,2)}</pre>
+                  {jobResult.geometry && <div style={{ marginTop:10 }}><button onClick={()=>{ drawGeoJSON(jobResult); setTab("map"); }} style={S.btn("#00ff88","#002a18")}>VIEW ON MAP →</button></div>}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* LOG TAB */}
+          <div className={`tab-panel${tab==="log" ? " active" : ""}`}>
+            <div className="tab-scroll">
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:14 }}>
+                <span style={S.label}>Request Log — {logs.length} entries</span>
+                <button onClick={() => setLogs([])} style={{ ...S.btn("#ff3366","transparent"), padding:"2px 10px", border:"none", fontSize:9 }}>CLEAR</button>
+              </div>
+              {logs.length===0 ? <div style={{ color:"#1a3a4a", fontSize:12, textAlign:"center", marginTop:60 }}>no requests yet</div>
+              : logs.map(l => (
+                <div key={l.id} style={{ display:"flex", alignItems:"center", gap:12, padding:"7px 0", borderBottom:"1px solid #0d1520", fontSize:11 }}>
+                  <span style={{ color:"#1a4a5a", minWidth:72, fontSize:10 }}>{l.time}</span>
+                  <span style={{ ...S.tag(STATUS_COLORS[l.status]||"#c8d8e8"), minWidth:34, textAlign:"center" }}>{l.status}</span>
+                  <span style={{ color:"#7aaabb" }}>{l.msg}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* DOCS TAB */}
+          <div className={`tab-panel${tab==="docs" ? " active" : ""}`}>
+            <div className="tab-scroll" style={{padding:"28px 32px"}}>
+              <div style={{marginBottom:32}}>
+                <div style={{fontSize:9,color:"#2a5a6a",letterSpacing:"0.2em",textTransform:"uppercase",marginBottom:8}}>REFERENCE</div>
+                <div style={{fontSize:22,color:"#c8d8e8",fontWeight:500,letterSpacing:"0.05em",marginBottom:6}}>OGC API – Processes</div>
+                <div style={{fontSize:12,color:"#4a7a9a",lineHeight:1.7,maxWidth:680}}>
+                  Full implementation of the <span style={{color:"#00ccff"}}>OGC API – Processes</span> standard using pygeoapi 0.24, served behind an nginx reverse proxy with JWT authentication and rate limiting.
+                </div>
+                <div style={{display:"flex",gap:10,marginTop:14,flexWrap:"wrap"}}>
+                  {[["Base URL","http://localhost"],["Auth","Bearer JWT token"],["Rate Limit","10 req/s · burst 20"],["Token Expiry","1 hour"]].map(([k,v])=>(
+                    <div key={k} style={{background:"#040810",border:"1px solid #1a2a3a",borderRadius:3,padding:"6px 12px"}}>
+                      <span style={{fontSize:9,color:"#2a5a6a",letterSpacing:"0.12em"}}>{k}: </span>
+                      <span style={{fontSize:11,color:"#00ccff"}}>{v}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <Section title="Authentication" color="#ffcc00">
+                <p style={{fontSize:12,color:"#7aaabb",lineHeight:1.8,marginBottom:14}}>
+                  All protected endpoints require a valid JWT token in the <code style={codeInline}>Authorization: Bearer &lt;token&gt;</code> header.
+                  Login via the UI at <code style={codeInline}>http://localhost/ui</code> or via the API below. Tokens expire after <code style={codeInline}>1 hour</code>.
+                  New users can only be created by an admin via the terminal — there is no self-registration.
+                </p>
+
+                <div style={{marginBottom:16}}>
+                  <div style={{fontSize:10,color:"#ffcc0088",letterSpacing:"0.12em",marginBottom:10}}>AUTH ENDPOINTS</div>
+                  <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:14}}>
+                    {[["/auth/login","POST","Authenticate and receive a JWT token","PUBLIC"],
+                      ["/auth/refresh","POST","Issue a new token from a still-valid token","AUTH"],
+                      ["/auth/revoke","POST","Invalidate the current token (logout)","AUTH"],
+                      ["/auth/me","GET","Return current user info and token expiry","AUTH"],
+                      ["/auth/users","GET","List all users — admin only","ADMIN"],
+                      ["/auth/users/{username}","DELETE","Deactivate a user — admin only","ADMIN"]
+                    ].map(([p,m,d,badge])=>(
+                      <div key={p} style={{...S.card,minWidth:200,flex:1}}>
+                        <div style={{display:"flex",gap:6,alignItems:"center",marginBottom:4}}>
+                          <span style={{...S.tag(m==="GET"?"#00ff88":m==="DELETE"?"#ff3366":"#00ccff"),fontSize:9}}>{m}</span>
+                          <code style={{fontSize:11,color:"#c8d8e8"}}>{p}</code>
+                          <span style={{marginLeft:"auto",fontSize:8,color:badge==="PUBLIC"?"#1a4a2a":badge==="ADMIN"?"#4a2a00":"#1a3a4a"}}>{badge}</span>
+                        </div>
+                        <div style={{fontSize:10,color:"#4a7a9a"}}>{d}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div style={{marginBottom:12}}>
+                  <div style={{fontSize:10,color:"#ffcc0088",letterSpacing:"0.12em",marginBottom:10}}>DEFAULT CREDENTIALS</div>
+                  <div style={{...S.card,display:"inline-block",marginBottom:14}}>
+                    <div style={{fontSize:9,color:"#2a5a6a",marginBottom:4}}>Seeded on first boot</div>
+                    <code style={{fontSize:12,color:"#ffcc00"}}>admin / admin123</code>
+                    
+                  </div>
+                </div>
+
+                <div style={{fontSize:10,color:"#ffcc0088",letterSpacing:"0.12em",marginBottom:8}}>EXAMPLE USAGE</div>
+                <CodeBlock>{`# 1. Login — get JWT token
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"admin123"}' \
+  http://localhost/auth/login
+# → {"token":"eyJhbGci...","expires_in":3600,"username":"admin","role":"admin"}
+
+# 2. Use token on protected endpoints
+curl -H "Authorization: Bearer eyJhbGci..." \
+  http://localhost/processes
+
+# 3. Register a new user (admin only, via terminal)
+TOKEN=$(curl -s -X POST -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"admin123"}' \
+  http://localhost/auth/login | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+
+curl -X POST -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"username":"newuser","password":"securepass","role":"user"}' \
+  http://localhost/auth/register
+
+# 4. Refresh token before expiry
+curl -X POST -H "Authorization: Bearer eyJhbGci..." \
+  http://localhost/auth/refresh
+
+# 5. Revoke token (logout)
+curl -X POST -H "Authorization: Bearer eyJhbGci..." \
+  http://localhost/auth/revoke`}</CodeBlock>
+              </Section>
+
+              <Section title="OGC Endpoints" color="#00ff88">
+                {[
+                  ["GET","/"            ,false,"200","Landing page — service metadata and resource links"],
+                  ["GET","/conformance" ,false,"200","OGC conformance classes satisfied by this implementation"],
+                  ["GET","/openapi"     ,false,"200","OpenAPI 3.0 specification document"],
+                  ["GET","/processes"   ,true, "200","List all registered processes"],
+                  ["GET","/processes/{id}",true,"200","Full process description with inputs and outputs"],
+                  ["POST","/processes/{id}/execution",true,"200/201","Execute a process — sync (200) or async with Prefer: respond-async (201)"],
+                  ["GET","/jobs"        ,true, "200","List all jobs with status"],
+                  ["GET","/jobs/{id}"   ,true, "200","Job status, progress, and timestamps"],
+                  ["GET","/jobs/{id}/results",true,"200","Retrieve completed job output — append ?f=json"],
+                  ["DELETE","/jobs/{id}",true, "200","Dismiss and delete a job"],
+                ].map(([method,path,auth,status,desc]) => (
+                  <EndpointRow key={path+method} method={method} path={path} auth={auth} status={status} desc={desc} />
+                ))}
+              </Section>
+
+              <Section title="Registered Processes" color="#00ccff">
+                <ProcessDoc id="buffer" title="Geodesic Buffer" color="#00ff88"
+                  desc="Creates a circular buffer polygon around a coordinate. Projects WGS84 → EPSG:3857, buffers, reprojects back. Returns GeoJSON Feature."
+                  inputs={[["latitude","number","Decimal degrees (-90 to 90)"],["longitude","number","Decimal degrees (-180 to 180)"],["distance","number","Buffer radius in metres"]]}
+                  example={`{"inputs": {"latitude": 12.9716, "longitude": 77.5946, "distance": 500}}`}
+                  response={`{"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[...]]]},"properties":{"distance_metres":500.0}}`}
+                />
+                <ProcessDoc id="zonal-stats" title="Zonal Statistics" color="#00ccff"
+                  desc="Computes descriptive statistics over numeric values within a zone polygon. Returns count, sum, min, max, mean, median, std_dev, range."
+                  inputs={[["zone","GeoJSON Polygon","Boundary polygon defining the zone"],["values","number[]","Array of numeric values within the zone"]]}
+                  example={`{"inputs": {"zone": {"type":"Polygon","coordinates":[[[77.58,12.96],[77.61,12.96],[77.61,12.99],[77.58,12.99],[77.58,12.96]]]},"values": [12.5,34.2,8.9,45.1,23.7]}}`}
+                  response={`{"type":"ZonalStatisticsResult","statistics":{"count":5,"sum":124.4,"min":8.9,"max":45.1,"mean":24.88,"median":23.7,"std_dev":13.45,"range":36.2}}`}
+                />
+              </Section>
+
+              <Section title="Async Job Lifecycle" color="#ff6b35">
+                <div style={{display:"flex",gap:0,marginBottom:16,flexWrap:"wrap"}}>
+                  {[["1","POST /execution","Submit","#ff6b35"],["2","GET /jobs/{id}","Poll status","#ffcc00"],["3","GET /jobs/{id}/results","Get result","#00ff88"],["4","DELETE /jobs/{id}","Cleanup","#4a7a9a"]].map(([n,p,d,c])=>(
+                    <div key={n} style={{display:"flex",alignItems:"center"}}>
+                      <div style={{background:"#040810",border:`1px solid ${c}44`,borderRadius:3,padding:"10px 14px",textAlign:"center"}}>
+                        <div style={{fontSize:9,color:c,marginBottom:4}}>STEP {n}</div>
+                        <code style={{fontSize:10,color:"#c8d8e8",display:"block",marginBottom:2}}>{p}</code>
+                        <div style={{fontSize:9,color:"#4a7a9a"}}>{d}</div>
+                      </div>
+                      {n!=="4" && <div style={{color:"#1a3a4a",padding:"0 6px",fontSize:14}}>→</div>}
+                    </div>
+                  ))}
+                </div>
+              </Section>
+            </div>
+          </div>
+
+        </main>
+      </div>
+    </div>
+  );
+}
+
+// ── Doc helper components ─────────────────────────────────────────────────────
+const codeInline = {
+  background:"#0a1420", border:"1px solid #1a2a3a", color:"#00ccff",
+  padding:"1px 5px", borderRadius:2, fontSize:"0.9em", fontFamily:"'DM Mono','Courier New',monospace"
+};
+
+function Section({title, color, children}) {
+  return (
+    <div style={{marginBottom:36}}>
+      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:16}}>
+        <div style={{width:3,height:16,background:color,borderRadius:2,flexShrink:0}} />
+        <span style={{fontSize:13,color,letterSpacing:"0.12em",textTransform:"uppercase",fontWeight:500}}>{title}</span>
+        <div style={{flex:1,height:1,background:"#1a2a3a"}} />
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function EndpointRow({method, path, auth, status, desc}) {
+  const [open, setOpen] = React.useState(false);
+  const c = method==="GET"?"#00ff88":method==="POST"?"#00ccff":"#ff3366";
+  return (
+    <div style={{marginBottom:6,border:"1px solid #1a2a3a",borderRadius:3,overflow:"hidden"}}>
+      <div onClick={()=>setOpen(o=>!o)} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 14px",cursor:"pointer",background:"#040810"}}
+        onMouseEnter={e=>e.currentTarget.style.background="#070f18"}
+        onMouseLeave={e=>e.currentTarget.style.background="#040810"}>
+        <span style={{...S.tag(c),minWidth:44,textAlign:"center"}}>{method}</span>
+        <code style={{fontSize:12,color:"#c8d8e8",flex:1,fontFamily:mono}}>{path}</code>
+        <span style={{fontSize:8,color:auth?"#2a5a6a":"#1a4a2a",marginRight:6}}>{auth?"🔑 AUTH":"PUBLIC"}</span>
+        <span style={{...S.tag("#00ff88"),fontSize:9}}>{status}</span>
+        <span style={{color:"#2a5a6a",fontSize:11,marginLeft:4}}>{open?"▲":"▼"}</span>
+      </div>
+      {open && <div style={{padding:"12px 16px",borderTop:"1px solid #1a2a3a",background:"#030810",fontSize:12,color:"#7aaabb",lineHeight:1.8}}>{desc}</div>}
+    </div>
+  );
+}
+
+function ProcessDoc({id, title, color, desc, inputs, example, response}) {
+  return (
+    <div style={{marginBottom:24,paddingBottom:24,borderBottom:"1px solid #1a2a3a"}}>
+      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
+        <span style={{...S.tag(color),fontSize:11,padding:"2px 10px"}}>{id}</span>
+        <span style={{fontSize:13,color:"#c8d8e8"}}>{title}</span>
+      </div>
+      <p style={{fontSize:12,color:"#7aaabb",lineHeight:1.8,marginBottom:12}}>{desc}</p>
+      <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:12}}>
+        {inputs.map(([n,t,d])=>(
+          <div key={n} style={{...S.card,flex:1,minWidth:160}}>
+            <div style={{display:"flex",gap:6,alignItems:"center",marginBottom:4}}>
+              <code style={{fontSize:12,color}}>{n}</code>
+              <span style={{fontSize:9,color:"#2a5a6a"}}>{t}</span>
+            </div>
+            <div style={{fontSize:10,color:"#4a7a9a"}}>{d}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{fontSize:10,color:"#2a5a6a",marginBottom:4}}>Request body:</div>
+      <CodeBlock>{example}</CodeBlock>
+      <div style={{fontSize:10,color:"#2a5a6a",marginTop:8,marginBottom:4}}>Response:</div>
+      <CodeBlock>{response}</CodeBlock>
+    </div>
+  );
+}
+
+function CodeBlock({children}) {
+  const [copied, setCopied] = React.useState(false);
+  const text = typeof children==="string" ? children.trim() : "";
+  const copy = () => { navigator.clipboard?.writeText(text); setCopied(true); setTimeout(()=>setCopied(false),1500); };
+  return (
+    <div style={{position:"relative",marginBottom:4}}>
+      <pre style={{background:"#020608",border:"1px solid #1a2a3a",borderRadius:3,padding:"10px 14px",fontSize:11,color:"#8abacc",overflowX:"auto",lineHeight:1.7,margin:0}}>{text}</pre>
+      <button onClick={copy} style={{position:"absolute",top:6,right:6,background:"#0a1420",border:"1px solid #1a2a3a",color:copied?"#00ff88":"#4a7a9a",padding:"2px 8px",borderRadius:2,cursor:"pointer",fontSize:9,fontFamily:mono}}>
+        {copied?"COPIED":"COPY"}
+      </button>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
+</script>
+</body>
+</html>

@@ -1,0 +1,53 @@
+server:
+  bind:
+    host: 0.0.0.0
+    port: 5000
+  url: http://localhost/
+  mimetype: application/json; charset=UTF-8
+  encoding: utf-8
+  gzip: false
+  language: en-US
+  cors: true
+  pretty_print: true
+  limit: 10
+  manager:
+    name: TinyDB
+    connection: /tmp/pygeoapi-jobs.db
+    output_dir: /tmp/
+
+logging:
+  level: INFO
+  logfile: /tmp/pygeoapi.log
+
+metadata:
+  identification:
+    title: OGC API – Processes Demo Server
+    description: A standards-compliant OGC API – Processes backend
+    keywords:
+      - geospatial
+      - OGC
+      - processes
+    keywords_type: theme
+    terms_of_service: https://creativecommons.org/licenses/by/4.0/
+    url: http://localhost/
+  license:
+    name: CC-BY 4.0 license
+    url: https://creativecommons.org/licenses/by/4.0/
+  provider:
+    name: Demo Organization
+    url: http://localhost/
+  contact:
+    name: Admin
+    email: admin@example.com
+
+resources:
+
+  buffer:
+    type: process
+    processor:
+      name: processes.buffer_process.BufferProcessor
+
+  zonal-stats:
+    type: process
+    processor:
+      name: processes.zonal_stats_process.ZonalStatsProcessor
