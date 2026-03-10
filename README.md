@@ -6,19 +6,20 @@ A production-grade implementation of the [OGC API – Processes](https://ogcapi.
 
 ## Table of Contents
 
-- [Overview](#overview)
-- [Architecture](#architecture)
-- [Project Structure](#project-structure)
+- [Part 1 — Backend Establishment & Configuration](#part-1--backend-establishment--configuration)
+  - [Implementation Selection](#1-implementation-selection)
+  - [Execution Environment](#2-execution-environment)
+  - [Configuration Parameters](#3-configuration-parameters)
+  - [Required OGC Endpoints](#4-required-ogc-endpoints)
+  - [Security Protocols & Authentication](#5-security-protocols--authentication)
+  - [Scaling Considerations](#6-scaling-considerations)
+- [Part 2 — Sample Process Execution](#part-2--sample-process-execution)
+  - [Processes Defined](#1-processes-defined)
+  - [Process Registration](#2-process-registration)
+  - [Full Lifecycle — Proof of Concept](#3-full-lifecycle--proof-of-concept)
 - [Quick Start](#quick-start)
-- [Authentication](#authentication)
-- [OGC API Endpoints](#ogc-api-endpoints)
-- [Processes](#processes)
-  - [Buffer](#buffer-process)
-  - [Zonal Statistics](#zonal-statistics-process)
-- [Job Lifecycle](#job-lifecycle)
 - [Frontend UI](#frontend-ui)
-- [Security](#security)
-- [Configuration](#configuration)
+- [Project Structure](#project-structure)
 - [Makefile Commands](#makefile-commands)
 - [curl Reference](#curl-reference)
 - [Production Considerations](#production-considerations)
@@ -27,23 +28,30 @@ A production-grade implementation of the [OGC API – Processes](https://ogcapi.
 
 ---
 
-## Overview
+## Part 1 — Backend Establishment & Configuration
 
-The **OGC API – Processes** standard defines a web API for publishing and executing geospatial processes over HTTP. It is the modern REST-based successor to WPS (Web Processing Service), standardised by the Open Geospatial Consortium.
+### 1. Implementation Selection
 
-This implementation provides:
+**Technology chosen: [pygeoapi](https://pygeoapi.io/)**
 
-- A fully compliant OGC API – Processes backend powered by **pygeoapi**
-- Two geospatial processes: **Geodesic Buffer** and **Zonal Statistics**
-- Both **synchronous** (immediate result) and **asynchronous** (job-based) execution modes
-- Full job management: submit → monitor → retrieve results → delete
-- JWT-based authentication with user management
-- Rate limiting, CORS, and secure HTTP headers enforced at the proxy layer
-- An interactive browser-based frontend UI
+pygeoapi is a mature, actively maintained open-source Python server implementing multiple OGC API standards including OGC API – Processes. It was selected over the available alternatives:
+
+| Alternative | Reason not selected |
+|-------------|-------------------|
+| PyWPS | Implements the older WPS 1.0/2.0 standard — not OGC API – Processes |
+| GeoServer | Java-based, heavyweight, requires additional plugins for OGC API – Processes |
+| Custom microservice | Significant effort to achieve full standard compliance from scratch |
+| **pygeoapi** | ✅ Native OGC API – Processes support, Python, lightweight, actively maintained |
+
+pygeoapi runs as a **gunicorn WSGI application** inside Docker, behind an nginx reverse proxy. It is never exposed directly to the internet — all traffic enters through nginx, which handles authentication, rate limiting, and security headers before proxying to pygeoapi.
 
 ---
 
-## Architecture
+### 2. Execution Environment
+
+**Containerisation with Docker and Docker Compose.**
+
+The entire stack runs as three isolated containers on a private Docker bridge network (`ogc-internal`):
 
 ```
 Browser / curl
@@ -65,133 +73,131 @@ Browser / curl
 │  auth service  │  │       pygeoapi        │
 │  (Flask :5000) │  │   (gunicorn :80)      │
 │                │  │                       │
-│  POST /login   │  │  GET  /processes      │
-│  POST /refresh │  │  GET  /processes/{id} │
-│  POST /revoke  │  │  POST /execution      │
-│  GET  /me      │  │  GET  /jobs           │
-│  GET  /users   │  │  GET  /jobs/{id}      │
-│                │  │  GET  /jobs/{id}/     │
-│  Users stored  │  │        results        │
-│  in /data/     │  │  DELETE /jobs/{id}    │
-│  users.json    │  │                       │
-│                │  │  Jobs stored in       │
-│  Tokens stored │  │  TinyDB (.db file)    │
-│  in /data/     │  │                       │
-│  tokens.json   │  └───────────────────────┘
-└────────────────┘
+│  /auth/login   │  │  /processes           │
+│  /auth/refresh │  │  /processes/{id}      │
+│  /auth/revoke  │  │  /processes/{id}/     │
+│  /auth/me      │  │    execution          │
+│  /auth/users   │  │  /jobs                │
+│                │  │  /jobs/{id}           │
+│  Users/tokens  │  │  /jobs/{id}/results   │
+│  stored in     │  │                       │
+│  /data/*.json  │  │  Jobs stored in       │
+│                │  │  TinyDB               │
+└────────────────┘  └───────────────────────┘
 
-All three containers communicate on an isolated Docker bridge
-network (ogc-internal). pygeoapi is never exposed to the host.
+All containers on isolated ogc-internal bridge network.
+Only nginx is exposed to the host on port 80.
+pygeoapi and auth are never directly reachable from outside.
 ```
 
-### Request Flow
+**Request flow:**
 
 1. Every request hits **nginx** first
-2. Public endpoints (`/`, `/conformance`, `/openapi`, `/ui`) are proxied directly
-3. For all other endpoints, nginx sends a subrequest to `/_auth_validate` (auth service)
-4. If auth returns `200`, nginx forwards the request to pygeoapi with `X-Auth-User` and `X-Auth-Role` headers injected
+2. Public endpoints (`/`, `/conformance`, `/openapi`, `/ui`) are proxied directly — no auth check
+3. For all other endpoints, nginx sends an internal subrequest to `/_auth_validate` (auth service)
+4. If the auth service returns `200`, nginx injects `X-Auth-User` and `X-Auth-Role` headers and forwards to pygeoapi
 5. If auth fails, nginx returns an OGC RFC 7807-formatted `401` or `403` — pygeoapi never sees the request
 
----
+**Dockerfiles:**
 
-## Project Structure
+- `./Dockerfile` — extends `geopython/pygeoapi:latest`, installs `shapely` and `pyproj` into the existing venv at `/venv`
+- `./auth/Dockerfile` — `python:3.11-slim`, installs Flask and gunicorn, runs as a non-root `authuser`
 
-```
-ogc-api/
-├── Dockerfile                  # pygeoapi image — installs shapely, pyproj
-├── docker-compose.yml          # Defines all 3 services + network + volumes
-├── Makefile                    # Convenience commands (up, down, restart, test, logs)
-├── requirements.txt            # Python deps for pygeoapi (shapely, pyproj)
-├── .env.example                # Environment variable template — copy to .env
-│
-├── auth/
-│   ├── Dockerfile              # python:3.11-slim base
-│   ├── app.py                  # Flask app — login, refresh, revoke, user management
-│   └── requirements.txt        # flask, gunicorn
-│
-├── config/
-│   └── pygeoapi-config.yml     # pygeoapi server config, process registration, TinyDB manager
-│
-├── frontend/
-│   └── index.html              # Single-file React + Leaflet UI (no build step required)
-│
-├── nginx/
-│   └── nginx.conf              # Reverse proxy, auth_request, rate limiting, CORS, headers
-│
-└── processes/
-    ├── buffer_process.py       # Geodesic buffer — WGS84 → EPSG:3857 → buffer → WGS84
-    └── zonal_stats_process.py  # Zonal statistics — count, sum, min, max, mean, median, std_dev
-```
+pygeoapi only starts after the auth service is confirmed healthy, and nginx only starts after both are healthy — enforced via `depends_on` with `condition: service_healthy` in docker-compose.
 
 ---
 
-## Quick Start
+### 3. Configuration Parameters
 
-### Prerequisites
+**pygeoapi** — `config/pygeoapi-config.yml`:
 
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Mac / Windows) or Docker Engine + Compose Plugin (Linux)
-- Port `80` free on your machine
+```yaml
+server:
+  bind:
+    host: 0.0.0.0
+    port: 80
+  manager:
+    name: TinyDB                        # Job persistence backend
+    connection: /tmp/pygeoapi-jobs.db   # Job storage path inside container
+    output_dir: /tmp
 
-### 1. Enter the project directory
-
-```bash
-cd ogc-api
+resources:                              # Processes registered here (NOT under 'processes:')
+  buffer:
+    type: process
+    processor:
+      name: processes.buffer_process.BufferProcessor
+  zonal-stats:
+    type: process
+    processor:
+      name: processes.zonal_stats_process.ZonalStatsProcessor
 ```
 
-### 2. Create your environment file
+**Auth service** — `.env`:
 
-```bash
-cp .env.example .env
-```
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `JWT_SECRET` | `super-secret-...` | HMAC-SHA256 signing key — **change in production** |
+| `TOKEN_EXPIRY_SECONDS` | `3600` | JWT lifetime in seconds (default 1 hour) |
 
-The defaults work for local development. For production, change `JWT_SECRET` to a long random string.
-
-### 3. Start the stack
-
-```bash
-make restart
-```
-
-This builds all three Docker images and starts the containers. First run takes ~60 seconds to pull base images. Subsequent starts take ~5 seconds (cached layers).
-
-### 4. Verify all containers are healthy
-
-```bash
-docker compose ps
-```
-
-Expected output:
-```
-NAME                   STATUS
-ogc-api-auth-1         Up (healthy)
-ogc-api-pygeoapi-1     Up (healthy)
-ogc-api-nginx-1        Up
-```
-
-### 5. Open the UI
-
-Visit **http://localhost/ui** and log in with:
-
-```
-username: admin
-password: admin123
-```
+Copy `.env.example` to `.env` to get started. The defaults work for local development.
 
 ---
 
-## Authentication
+### 4. Required OGC Endpoints
 
-This project uses **JWT (JSON Web Token)** authentication. All OGC API endpoints except the three public discovery endpoints require a valid Bearer token.
+All required OGC API – Processes endpoints are implemented and verified working.
 
-### How it works
+#### Public (no authentication required)
 
-1. `POST /auth/login` with your credentials
-2. Auth service verifies them, issues a signed JWT (1 hour expiry by default)
-3. Include the token in every subsequent request: `Authorization: Bearer <token>`
-4. nginx validates the token on every request via an internal subrequest to the auth service
-5. On logout, `POST /auth/revoke` marks the token as revoked server-side immediately
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/` | Landing page — service metadata and resource links |
+| `GET` | `/conformance` | OGC conformance classes satisfied by this implementation |
+| `GET` | `/openapi` | OpenAPI 3.0 specification document |
 
-### Auth endpoints
+#### Protected (JWT Bearer token required)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/processes` | List all registered processes |
+| `GET` | `/processes/{processId}` | Full process description with input/output schemas |
+| `POST` | `/processes/{processId}/execution` | Execute a process — synchronous or asynchronous |
+| `GET` | `/jobs` | List all submitted jobs |
+| `GET` | `/jobs/{jobId}` | Job status, progress percentage, and timestamps |
+| `GET` | `/jobs/{jobId}/results` | Retrieve completed job output |
+| `DELETE` | `/jobs/{jobId}` | Dismiss and delete a job |
+
+#### Response formats
+
+Append `?f=` to any GET request:
+
+| Parameter | Content-Type | Description |
+|-----------|-------------|-------------|
+| `?f=json` | `application/json` | Standard JSON — default |
+| `?f=jsonld` | `application/ld+json` | JSON-LD with OGC linked data context |
+| `?f=html` | `text/html` | Human-readable HTML rendered by pygeoapi |
+
+---
+
+### 5. Security Protocols & Authentication
+
+All security is enforced at the **nginx layer** — before any request reaches pygeoapi.
+
+#### JWT Authentication
+
+A dedicated Flask auth service (`auth/app.py`) handles all user and token management. Tokens are fully spec-compliant JWTs signed with **HMAC-SHA256**, implemented using Python's standard library (`hmac`, `hashlib`, `base64`) — no external JWT dependency. The tokens are in the standard `header.payload.signature` format and decodable by any JWT debugger such as [jwt.io](https://jwt.io).
+
+```
+eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9    ← Base64url({"alg":"HS256","typ":"JWT"})
+.eyJzdWIiOiJhZG1pbiIsInJvbGUiOiJhZG1...  ← Base64url({sub, role, exp, iat, jti})
+.xK8z2mP...                               ← HMAC-SHA256 signature
+```
+
+- Passwords hashed with **PBKDF2-SHA256** (260,000 iterations)
+- Token **revocation** tracked server-side — logout invalidates the token immediately, before expiry
+- nginx validates every JWT via `auth_request` internal subrequest before proxying to pygeoapi
+
+**Auth endpoints:**
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
@@ -202,104 +208,147 @@ This project uses **JWT (JSON Web Token)** authentication. All OGC API endpoints
 | `GET` | `/auth/users` | Admin | List all users |
 | `DELETE` | `/auth/users/{username}` | Admin | Deactivate a user |
 
-### Default credentials
+Default credentials (seeded on first boot): `admin / admin123` — change before production.
 
-A default admin user is seeded automatically on first boot:
-
-```
-username: admin
-password: admin123
-```
-
-> ⚠️ Change this password before any production deployment.
-
-### Registering new users
-
-There is no self-registration from the UI. New users must be created by an admin:
+New users are created by admins only — no self-registration from the UI:
 
 ```bash
-# Get admin token
 TOKEN=$(curl -s -X POST http://localhost/auth/login \
   -H "Content-Type: application/json" \
   -d '{"username":"admin","password":"admin123"}' \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
 
-# Create new user
 curl -X POST http://localhost/auth/register \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
   -d '{"username":"newuser","password":"securepass123","role":"user"}'
 ```
 
-Available roles: `user` (standard access) and `admin` (user management).
+#### CORS Policies
+
+```nginx
+add_header Access-Control-Allow-Origin  "*" always;
+add_header Access-Control-Allow-Methods "GET, POST, DELETE, OPTIONS" always;
+add_header Access-Control-Allow-Headers "Content-Type, Authorization" always;
+```
+
+OPTIONS preflight requests return `204 No Content` before reaching pygeoapi. Replace `"*"` with your domain in production.
+
+#### Rate Limiting
+
+```nginx
+limit_req_zone $binary_remote_addr zone=ogc_limit:10m  rate=10r/s;  # burst 20
+limit_req_zone $binary_remote_addr zone=auth_limit:10m rate=5r/s;   # burst 10
+```
+
+Two zones: standard API traffic at 10 req/s and auth endpoints at 5 req/s to slow brute-force attempts.
+
+#### Secure HTTP Headers
+
+```nginx
+add_header X-Content-Type-Options "nosniff" always;
+add_header X-Frame-Options        "DENY"    always;
+```
+
+#### Input Validation
+
+Every process input is validated against a JSON Schema defined in the process class before any execution begins. Missing fields, wrong types, or out-of-range values return `400 Bad Request`.
+
+#### Network Isolation
+
+pygeoapi and the auth service are **not exposed to the host machine** — they only listen on the internal `ogc-internal` Docker bridge network. The sole public entry point is nginx on port 80.
 
 ---
 
-## OGC API Endpoints
+### 6. Scaling Considerations
 
-### Public (no auth required)
+The current configuration handles moderate workloads with:
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/` | Landing page — service metadata and resource links |
-| `GET` | `/conformance` | OGC conformance classes this implementation satisfies |
-| `GET` | `/openapi` | OpenAPI 3.0 specification document |
+- **Resource limits** on pygeoapi (`cpus: 2`, `memory: 1G` in docker-compose)
+- **Rate limiting** at nginx prevents any single client overwhelming the service
+- **Stateless API layer** — pygeoapi holds no session state; auth state lives in the auth service, job state in TinyDB
 
-### Protected (JWT required)
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/processes` | List all registered processes |
-| `GET` | `/processes/{processId}` | Full process description with input/output schemas |
-| `POST` | `/processes/{processId}/execution` | Execute a process — sync or async |
-| `GET` | `/jobs` | List all jobs |
-| `GET` | `/jobs/{jobId}` | Job status, progress, and timestamps |
-| `GET` | `/jobs/{jobId}/results` | Retrieve completed job output |
-| `DELETE` | `/jobs/{jobId}` | Dismiss and delete a job |
-
-### Response formats
-
-Append `?f=` to any GET request:
-
-| Parameter | Content-Type | Description |
-|-----------|-------------|-------------|
-| `?f=json` | `application/json` | Standard JSON (default) |
-| `?f=jsonld` | `application/ld+json` | JSON-LD with OGC linked data context |
-| `?f=html` | `text/html` | Human-readable HTML rendered by pygeoapi |
+For high-traffic production use, see [Production Considerations](#production-considerations) which covers horizontal pygeoapi replicas, PostgreSQL for shared job state, and Kubernetes.
 
 ---
 
-## Processes
+## Part 2 — Sample Process Execution
 
-### Buffer Process
+### 1. Processes Defined
 
-**ID:** `buffer` | **Endpoint:** `POST /processes/buffer/execution`
+Two meaningful geospatial processes are implemented, directly matching the examples cited in the brief.
 
-Creates a circular buffer polygon around a coordinate point. Projects from WGS84 (EPSG:4326) → Web Mercator (EPSG:3857) to apply a metric distance buffer → reprojects back to WGS84. Returns a GeoJSON Feature with a Polygon geometry.
+#### Buffer Process
 
-#### Inputs
+**ID:** `buffer` | **File:** `processes/buffer_process.py`
 
-| Name | Type | Required | Description |
-|------|------|----------|-------------|
+Creates a circular buffer polygon around a coordinate point. Projects WGS84 (EPSG:4326) → Web Mercator (EPSG:3857) to apply an accurate metric buffer → reprojects back to WGS84. Returns a GeoJSON Feature.
+
+| Input | Type | Required | Description |
+|-------|------|----------|-------------|
 | `latitude` | number | Yes | Decimal degrees, -90 to 90 |
 | `longitude` | number | Yes | Decimal degrees, -180 to 180 |
 | `distance` | number | Yes | Buffer radius in metres |
 
-#### Example
+**Output:** GeoJSON Feature (Polygon) with `center_latitude`, `center_longitude`, and `distance_metres` properties.
+
+#### Zonal Statistics Process
+
+**ID:** `zonal-stats` | **File:** `processes/zonal_stats_process.py`
+
+Computes descriptive statistics over a set of numeric values within a defined zone polygon. Returns count, sum, min, max, mean, median, standard deviation, and range.
+
+| Input | Type | Required | Description |
+|-------|------|----------|-------------|
+| `zone` | GeoJSON Polygon | Yes | Boundary polygon defining the zone |
+| `values` | number[] | Yes | Array of numeric values within the zone |
+
+**Output:** Statistics object — `count`, `sum`, `min`, `max`, `mean`, `median`, `std_dev`, `range`.
+
+---
+
+### 2. Process Registration
+
+Processes are registered in `config/pygeoapi-config.yml` under `resources:`. Each process class extends pygeoapi's `BaseProcessor`, defines its input/output metadata, and implements an `execute()` method. The `PYTHONPATH=/pygeoapi` environment variable in docker-compose ensures gunicorn can discover the process modules at startup.
+
+```yaml
+resources:
+  buffer:
+    type: process
+    processor:
+      name: processes.buffer_process.BufferProcessor
+
+  zonal-stats:
+    type: process
+    processor:
+      name: processes.zonal_stats_process.ZonalStatsProcessor
+```
+
+---
+
+### 3. Full Lifecycle — Proof of Concept
+
+This section demonstrates the complete OGC API – Processes execution lifecycle: **submission → monitoring → result retrieval → cleanup**, for both synchronous and asynchronous modes.
+
+Get your token first:
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"admin123"}' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+```
+
+#### Synchronous Execution — Buffer (HTTP 200)
 
 ```bash
 curl -X POST http://localhost/processes/buffer/execution \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
-  -d '{
-    "inputs": {
-      "latitude": 12.9716,
-      "longitude": 77.5946,
-      "distance": 500
-    }
-  }'
+  -d '{"inputs": {"latitude": 12.9716, "longitude": 77.5946, "distance": 500}}'
 ```
 
+Response (`200 OK`) — result returned immediately:
 ```json
 {
   "type": "Feature",
@@ -315,22 +364,7 @@ curl -X POST http://localhost/processes/buffer/execution \
 }
 ```
 
----
-
-### Zonal Statistics Process
-
-**ID:** `zonal-stats` | **Endpoint:** `POST /processes/zonal-stats/execution`
-
-Computes descriptive statistics over a set of numeric values within a defined zone polygon. Returns count, sum, min, max, mean, median, standard deviation, and range.
-
-#### Inputs
-
-| Name | Type | Required | Description |
-|------|------|----------|-------------|
-| `zone` | GeoJSON Polygon | Yes | Boundary polygon defining the zone |
-| `values` | number[] | Yes | Array of numeric values within the zone |
-
-#### Example
+#### Synchronous Execution — Zonal Statistics (HTTP 200)
 
 ```bash
 curl -X POST http://localhost/processes/zonal-stats/execution \
@@ -351,6 +385,7 @@ curl -X POST http://localhost/processes/zonal-stats/execution \
   }'
 ```
 
+Response (`200 OK`):
 ```json
 {
   "type": "ZonalStatisticsResult",
@@ -367,138 +402,159 @@ curl -X POST http://localhost/processes/zonal-stats/execution \
 }
 ```
 
----
+#### Asynchronous Execution — Full Lifecycle (HTTP 201)
 
-## Job Lifecycle
+Add `Prefer: respond-async`. The server returns `201 Created` with a `jobID` immediately; processing happens in the background.
 
-### Synchronous execution
-
-No special header needed. The result is returned immediately with HTTP `200`.
-
+**Step 1 — Submit:**
 ```bash
 curl -X POST http://localhost/processes/buffer/execution \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
-  -d '{"inputs": {"latitude": 12.9716, "longitude": 77.5946, "distance": 500}}'
-# → 200 OK  +  GeoJSON result immediately
+  -H "Prefer: respond-async" \
+  -d '{"inputs": {"latitude": 12.9716, "longitude": 77.5946, "distance": 1000}}'
+```
+```json
+{"jobID": "33136070-1c40-11f1-8ba3-15d7c94da424", "status": "accepted"}
 ```
 
-### Asynchronous execution
-
-Add `Prefer: respond-async`. The server returns `201 Created` with a `jobID` immediately and processes in the background.
-
+**Step 2 — Monitor:**
+```bash
+curl "http://localhost/jobs/33136070-1c40-11f1-8ba3-15d7c94da424?f=json" \
+  -H "Authorization: Bearer $TOKEN"
 ```
-Step 1:  POST /processes/{id}/execution  +  Prefer: respond-async
-         → 201 Created  +  {"jobID": "abc123...", "status": "accepted"}
-
-Step 2:  GET /jobs/abc123...?f=json
-         → {"status": "successful", "progress": 100, ...}
-
-Step 3:  GET /jobs/abc123.../results?f=json
-         → result object
-
-Step 4:  DELETE /jobs/abc123...
-         → {"status": "dismissed"}
+```json
+{
+  "status": "successful",
+  "progress": 100,
+  "created": "2026-03-10T05:15:48.559346Z",
+  "finished": "2026-03-10T05:15:48.583483Z"
+}
 ```
 
-### Job status values
+Status values: `accepted` → `running` → `successful` / `failed`
 
-| Status | Meaning |
-|--------|---------|
-| `accepted` | Job queued, not yet started |
-| `running` | Currently executing |
-| `successful` | Complete — results available |
-| `failed` | Encountered an error |
-| `dismissed` | Deleted |
+**Step 3 — Retrieve result:**
+```bash
+curl "http://localhost/jobs/33136070-1c40-11f1-8ba3-15d7c94da424/results?f=json" \
+  -H "Authorization: Bearer $TOKEN"
+```
 
-> Jobs persist while the pygeoapi container is running. They are stored in TinyDB — a lightweight JSON file database at `/tmp/pygeoapi-jobs.db` inside the container. See [Production Considerations](#production-considerations) for persistence options.
+Returns the GeoJSON Feature polygon — identical output to synchronous execution.
+
+**Step 4 — Delete job:**
+```bash
+curl -X DELETE "http://localhost/jobs/33136070-1c40-11f1-8ba3-15d7c94da424" \
+  -H "Authorization: Bearer $TOKEN"
+```
+```json
+{"status": "dismissed"}
+```
+
+#### Lifecycle Diagram
+
+```
+Client                    nginx              auth service        pygeoapi
+  │                         │                     │                 │
+  ├─ POST /execution ───────▶                     │                 │
+  │  Prefer: respond-async  ├─ /_auth_validate ──▶│                 │
+  │                         │◀─ 200 OK ───────────│                 │
+  │                         ├─ proxy ─────────────────────────────▶ │
+  │◀─ 201 Created ──────────────────────────────────────────────── │
+  │   + jobID               │                     │                 │
+  │                         │                     │                 │
+  ├─ GET /jobs/{id} ────────▶                     │                 │
+  │                         ├─ /_auth_validate ──▶│                 │
+  │                         ├─ proxy ─────────────────────────────▶ │
+  │◀─ status: successful ───────────────────────────────────────── │
+  │                         │                     │                 │
+  ├─ GET /jobs/{id}/results ▶                     │                 │
+  │                         ├─ proxy ─────────────────────────────▶ │
+  │◀─ GeoJSON result ───────────────────────────────────────────── │
+  │                         │                     │                 │
+  ├─ DELETE /jobs/{id} ─────▶                     │                 │
+  │◀─ dismissed ────────────────────────────────────────────────── │
+```
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Mac/Windows) or Docker Engine + Compose Plugin (Linux)
+- Port `80` free on your machine
+
+### Steps
+
+```bash
+# 1. Enter the project directory
+cd ogc-api
+
+# 2. Create your environment file
+cp .env.example .env
+
+# 3. Build and start all three containers
+make restart
+
+# 4. Confirm all containers are healthy
+docker compose ps
+# NAME                   STATUS
+# ogc-api-auth-1         Up (healthy)
+# ogc-api-pygeoapi-1     Up (healthy)
+# ogc-api-nginx-1        Up
+
+# 5. Open the UI
+open http://localhost/ui
+# Login: admin / admin123
+```
 
 ---
 
 ## Frontend UI
 
-A self-contained single-page application served at **http://localhost/ui**. Built with React and Leaflet, loaded from CDN — no npm, no build step.
-
-### Tabs
+An interactive single-page application at **http://localhost/ui** — React + Leaflet loaded from CDN, no build step required.
 
 | Tab | Description |
 |-----|-------------|
-| **Map** | Interactive Leaflet map. Click to place a buffer point, draw a polygon for zonal stats, execute processes, and see GeoJSON results overlaid on the map |
-| **API** | Click any endpoint in the sidebar to call it and see the raw JSON response |
-| **Jobs** | Enter a job ID to check status, retrieve results, or delete. Results can be sent directly to the Map tab |
-| **Log** | Running history of every HTTP request made in the current session with status codes |
-| **Docs** | Full in-app API reference — endpoint descriptions, process input schemas, auth guide, async lifecycle, and response format guide |
+| **Map** | Click to place a buffer point, draw a polygon for zonal stats, execute processes and see GeoJSON results overlaid on the map |
+| **API** | Click any endpoint in the sidebar to call it and view the raw JSON response |
+| **Jobs** | Enter a job ID to check status, retrieve results, or delete. Results link directly to the Map tab |
+| **Log** | Running history of every HTTP request in the current session with status codes |
+| **Docs** | Full in-app reference — endpoint descriptions, process schemas, auth guide, async lifecycle diagram |
 
-### Sidebar
-
-- **Response format** — toggle `?f=json`, `?f=jsonld`, `?f=html`
-- **Active token** — displays your current JWT (truncated header only)
-- **Execution mode** — toggle `sync` / `async` for process execution buttons
-- **User menu** (top right) — username, role, token expiry, and sign out
+**Sidebar controls:** response format toggle (`?f=json` / `?f=jsonld` / `?f=html`), sync/async execution mode toggle, active JWT display, user menu with sign out.
 
 ---
 
-## Security
+## Project Structure
 
-### Authentication
-
-- Tokens signed with **HMAC-SHA256** using a configurable secret
-- Passwords hashed with **PBKDF2-SHA256** (260,000 iterations)
-- Token **revocation** tracked server-side — logout invalidates the token immediately, before expiry
-- Token expiry configurable (default 1 hour)
-
-### nginx security layer
-
-All enforced before any request reaches the application services:
-
-```nginx
-# Rate limiting — prevents brute-force and abuse
-limit_req_zone $binary_remote_addr zone=ogc_limit:10m  rate=10r/s;  # burst 20
-limit_req_zone $binary_remote_addr zone=auth_limit:10m rate=5r/s;   # burst 10
-
-# CORS
-add_header Access-Control-Allow-Origin  "*" always;
-add_header Access-Control-Allow-Methods "GET, POST, DELETE, OPTIONS" always;
-add_header Access-Control-Allow-Headers "Content-Type, Authorization" always;
-
-# Security headers
-add_header X-Content-Type-Options "nosniff" always;
-add_header X-Frame-Options        "DENY"    always;
 ```
-
-### Network isolation
-
-pygeoapi and the auth service are **not exposed to the host**. They only communicate on the internal `ogc-internal` Docker bridge network. The only public entry point is nginx on port 80.
-
-### Input validation
-
-Process inputs are validated against JSON Schema before execution. Missing required fields, wrong types, or out-of-range values return `400 Bad Request`.
-
----
-
-## Configuration
-
-### Environment variables (`.env`)
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `JWT_SECRET` | `super-secret-...` | Secret key for signing tokens — **change in production** |
-| `TOKEN_EXPIRY_SECONDS` | `3600` | Token lifetime in seconds |
-
-### pygeoapi (`config/pygeoapi-config.yml`)
-
-Defines service metadata, registered processes, and the TinyDB job manager. Processes must be registered under the `resources:` key.
-
-### nginx (`nginx/nginx.conf`)
-
-Controls all routing logic. Key locations:
-
-| Location | Purpose |
-|----------|---------|
-| `/_auth_validate` | Internal JWT validation subrequest to auth service |
-| `/auth/` | Passes auth requests directly to Flask service |
-| `/ui` | Serves static frontend files |
-| `/` (catch-all) | JWT-protected, rate-limited, proxied to pygeoapi |
+ogc-api/
+├── Dockerfile                  # pygeoapi image (extends geopython/pygeoapi:latest)
+├── docker-compose.yml          # 3 services: nginx, auth, pygeoapi + network + volumes
+├── Makefile                    # up, down, restart, logs, status, shell, test, clean
+├── requirements.txt            # shapely, pyproj for pygeoapi
+├── .env.example                # Environment variable template — copy to .env
+│
+├── auth/
+│   ├── Dockerfile              # python:3.11-slim, non-root user
+│   ├── app.py                  # Flask JWT auth service — login, refresh, revoke, users
+│   └── requirements.txt        # flask==3.0.3, gunicorn==21.2.0
+│
+├── config/
+│   └── pygeoapi-config.yml     # OGC API server config + process registration + TinyDB manager
+│
+├── frontend/
+│   └── index.html              # Self-contained React + Leaflet UI
+│
+├── nginx/
+│   └── nginx.conf              # Reverse proxy, auth_request, rate limiting, CORS, headers
+│
+└── processes/
+    ├── buffer_process.py       # Geodesic buffer — WGS84 → EPSG:3857 → buffer → WGS84
+    └── zonal_stats_process.py  # Zonal statistics — count, sum, min, max, mean, median, std_dev
+```
 
 ---
 
@@ -508,7 +564,7 @@ Run all commands from the `ogc-api/` root directory.
 
 | Command | Description |
 |---------|-------------|
-| `make restart` | Stop, rebuild images, and start the stack |
+| `make restart` | Stop, rebuild images, and start the full stack |
 | `make up` | Build and start without stopping first |
 | `make down` | Stop and remove all containers |
 | `make logs` | Tail live logs from all containers |
@@ -521,71 +577,29 @@ Run all commands from the `ogc-api/` root directory.
 
 ## curl Reference
 
-A complete shell script covering every endpoint is included at `ogc-api-curl-reference.sh`:
+A complete shell script covering every endpoint is included:
 
 ```bash
 chmod +x ogc-api-curl-reference.sh
 ./ogc-api-curl-reference.sh
 ```
 
-Sections covered: authentication, discovery endpoints, process discovery, buffer execution (sync + async), zonal stats execution (sync + async), job management, complete async lifecycle walkthrough, response format variants, error cases, and rate limiting.
-
-**Quick start — get your token:**
-
-```bash
-TOKEN=$(curl -s -X POST http://localhost/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"admin123"}' \
-  | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
-```
-
-Then use `$TOKEN` in all subsequent requests as `Authorization: Bearer $TOKEN`.
+Covers all 10 sections: authentication, discovery endpoints, process discovery, buffer execution (sync + async), zonal stats execution (sync + async), job management, complete async lifecycle walkthrough, response format variants, error cases, and rate limiting.
 
 ---
 
 ## Production Considerations
 
-This project fully satisfies all OGC API – Processes requirements. The following items were intentionally deferred as out of scope for local development but must be addressed before any real production deployment:
+All core requirements are fully implemented. The following were intentionally deferred as out of scope for local development:
 
-### HTTPS / TLS
-
-Currently plain HTTP. In production, terminate TLS at nginx using Let's Encrypt (certbot) or a cloud load balancer. JWT tokens and credentials travel in plaintext over HTTP — only acceptable on localhost.
-
-### Job persistence
-
-TinyDB stores jobs in a flat file inside the container — lost on `docker compose down -v`. For production, switch pygeoapi to its native **PostgreSQL manager**:
-
-```yaml
-manager:
-  name: PostgreSQL
-  connection: postgresql://user:pass@postgres:5432/pygeoapi
-```
-
-### Horizontal scaling
-
-A single pygeoapi instance is running. For high traffic, run multiple replicas behind nginx with `upstream` load balancing — but this requires PostgreSQL for shared job state first.
-
-### CORS lockdown
-
-Currently open to all origins (`*`). In production, restrict to your actual frontend domain:
-
-```nginx
-add_header Access-Control-Allow-Origin "https://yourdomain.com" always;
-```
-
-### JWT secret strength
-
-Generate a strong secret for production:
-
-```bash
-openssl rand -hex 32
-```
-
-Store it in a proper secrets manager (AWS Secrets Manager, HashiCorp Vault, Docker Secrets) — not in a plaintext `.env` file.
-
-### Kubernetes
-
-Each of the three services maps cleanly to a Kubernetes Deployment + Service. The docker-compose setup was chosen here for simplicity, as Kubernetes is listed as an example option in the brief rather than a requirement.
+| Item | Current state | Production recommendation |
+|------|--------------|--------------------------|
+| **HTTPS / TLS** | Plain HTTP — fine for localhost | Terminate TLS at nginx with Let's Encrypt or a cloud load balancer |
+| **Job persistence** | TinyDB — lost on `docker compose down -v` | Switch to pygeoapi's native PostgreSQL manager |
+| **Horizontal scaling** | Single pygeoapi instance | Multiple replicas behind nginx `upstream` + PostgreSQL for shared job state |
+| **CORS** | Open to all origins (`*`) | Lock down to your actual frontend domain |
+| **JWT secret** | Default placeholder | `openssl rand -hex 32`, stored in a secrets manager — not a plaintext `.env` |
+| **Kubernetes** | docker-compose for simplicity | Each service maps cleanly to a Deployment + Service; Kubernetes is listed as an example option in the brief |
 
 ---
 
@@ -597,8 +611,8 @@ Each of the three services maps cleanly to a Kubernetes Deployment + Service. Th
 | Auth service | Flask + gunicorn | 3.0.3 / 21.2.0 |
 | Reverse proxy | nginx | alpine |
 | Containerisation | Docker + Compose v2 | — |
-| Geospatial libs | shapely + pyproj | latest |
-| Job store | TinyDB | built-in to pygeoapi |
+| Geospatial libraries | shapely + pyproj | latest |
+| Job storage | TinyDB | built-in to pygeoapi |
 | Frontend | React + Leaflet | 18 / 1.9.4 |
 | Map tiles | CartoDB Dark Matter | — |
 
@@ -606,13 +620,11 @@ Each of the three services maps cleanly to a Kubernetes Deployment + Service. Th
 
 ## OGC Conformance
 
-This implementation satisfies the following OGC API – Processes conformance classes:
-
 | Conformance class | Status |
 |---|---|
 | Core — `/processes`, `/jobs`, `/results` | ✅ |
-| Sync execution (HTTP 200) | ✅ |
-| Async execution (HTTP 201 + jobID) | ✅ |
+| Synchronous execution (HTTP 200) | ✅ |
+| Asynchronous execution (HTTP 201 + jobID) | ✅ |
 | OGC Process Description (input/output schemas) | ✅ |
 | Job list with pagination | ✅ |
 | Dismiss — `DELETE /jobs/{jobId}` | ✅ |
