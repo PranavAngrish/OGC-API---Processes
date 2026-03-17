@@ -8,7 +8,7 @@ https://github.com/user-attachments/assets/8f380313-a3a6-41d1-b830-60ea0805eb5f
 
 ---
 
-Follow my MCP + OGC implementation learning on this web page : [Journey So Far : My Understanding](https://ogc-journey.vercel.app/)
+Follow my MCP + OGC implementation learning on this web page : [Journey So Far - My Understanding](https://ogc-journey.vercel.app/)
 
 ---
 
