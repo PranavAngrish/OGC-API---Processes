@@ -8,6 +8,10 @@ https://github.com/user-attachments/assets/8f380313-a3a6-41d1-b830-60ea0805eb5f
 
 ---
 
+Follow my MCP + OGC implementation learning here : [Journey So Far](https://ogc-journey.vercel.app/#next)
+
+--
+
 ## Table of Contents
 
 - [Part 1 — Backend Establishment & Configuration](#part-1--backend-establishment--configuration)
